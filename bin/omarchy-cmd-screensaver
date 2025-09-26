@@ -1,29 +1,80 @@
 #!/bin/bash
-
 screensaver_in_focus() {
   hyprctl activewindow -j | jq -e '.class == "Screensaver"' >/dev/null 2>&1
 }
-
 exit_screensaver() {
   hyprctl keyword cursor:invisible false
   pkill -x tte 2>/dev/null
   pkill -f "alacritty --class Screensaver" 2>/dev/null
+  [[ -n "$temp_file" ]] && rm -f "$temp_file"
   exit 0
 }
-
 trap exit_screensaver SIGINT SIGTERM SIGHUP SIGQUIT
-
 hyprctl keyword cursor:invisible true
-
 while true; do
+  temp_file=""
+  # Randomly select an .ans file from the screensaver directory
+  screensaver_file=$(find ~/.config/omarchy/branding/screensaver -type f -name "*.ans" | shuf -n1)
   effect=$(tte 2>&1 | grep -oP '{\K[^}]+' | tr ',' ' ' | tr ' ' '\n' | sed -n '/^beams$/,$p' | sort -u | shuf -n1)
-  tte -i ~/.config/omarchy/branding/screensaver.txt \
-    --frame-rate 240 --canvas-width 0 --canvas-height $(($(tput lines) - 2)) --anchor-canvas c --anchor-text c \
-    "$effect" &
-
-  while pgrep -x tte >/dev/null; do
-    if read -n 1 -t 3 || ! screensaver_in_focus; then
-      exit_screensaver
+  # Check if a valid .ans file was found, otherwise use fallback
+  if [[ -n "$screensaver_file" ]]; then
+    # Try running tte with the original file (assuming UTF-8)
+    tte -i "$screensaver_file" \
+      --frame-rate 240 --canvas-width 0 --canvas-height $(($(tput lines) - 2)) --anchor-canvas c --anchor-text c \
+      "$effect" 2>/dev/null &
+    pid=$!
+    sleep 0.5  # Give time for tte to start or fail due to encoding error
+    if ! kill -0 $pid 2>/dev/null; then
+      # If failed, try converting from CP437 to UTF-8
+      temp_file=$(mktemp)
+      if ! iconv -f CP437 -t UTF-8 "$screensaver_file" -o "$temp_file" 2>/dev/null; then
+        rm -f "$temp_file"
+        temp_file=""
+        sleep 1
+        continue  # Skip if conversion fails
+      fi
+      tte -i "$temp_file" \
+        --frame-rate 240 --canvas-width 0 --canvas-height $(($(tput lines) - 2)) --anchor-canvas c --anchor-text c \
+        "$effect" 2>/dev/null &
+      pid=$!
+      sleep 0.5
+      if ! kill -0 $pid 2>/dev/null; then
+        rm -f "$temp_file"
+        temp_file=""
+        sleep 1
+        continue  # Skip if converted file still fails
+      fi
     fi
-  done
+    # Wait for tte to finish naturally or exit on input/inactive window
+    while kill -0 $pid 2>/dev/null; do
+      if read -n 1 -t 3 || ! screensaver_in_focus; then
+        exit_screensaver
+      fi
+    done
+    [[ -n "$temp_file" ]] && rm -f "$temp_file"
+    temp_file=""
+  else
+    # Fallback to screensaver.txt if no .ans files are found
+    fallback_file="$HOME/.config/omarchy/branding/screensaver.txt"
+    if [[ -f "$fallback_file" ]]; then
+      tte -i "$fallback_file" \
+        --frame-rate 240 --canvas-width 0 --canvas-height $(($(tput lines) - 2)) --anchor-canvas c --anchor-text c \
+        "$effect" 2>/dev/null &
+      pid=$!
+      sleep 0.5
+      if ! kill -0 $pid 2>/dev/null; then
+        sleep 1
+        continue  # Skip if fallback fails (unlikely, but for consistency)
+      fi
+      while kill -0 $pid 2>/dev/null; do
+        if read -n 1 -t 3 || ! screensaver_in_focus; then
+          exit_screensaver
+        fi
+      done
+    else
+      # If no files are available, wait briefly before trying again
+      sleep 1
+      continue
+    fi
+  fi
 done
